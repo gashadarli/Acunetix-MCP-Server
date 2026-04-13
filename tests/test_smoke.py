@@ -1,62 +1,91 @@
-"""Smoke tests for Acunetix MCP Server - no Acunetix instance required."""
+"""Smoke tests — no Acunetix instance required."""
 
 import os
 import asyncio
 import pytest
 
-# Ensure env vars are set so config.validate() doesn't fail during import
+# Set env vars BEFORE importing any acunetix_mcp modules.
+# In production the client sets these lazily; here we just need them
+# so config.validate() (called lazily on first HTTP call) would pass.
 os.environ.setdefault("ACUNETIX_BASE_URL", "https://127.0.0.1:3443/api/v1")
 os.environ.setdefault("ACUNETIX_API_KEY", "test-key-for-smoke-tests")
 
-from acunetix_mcp.server import mcp, create_server
-from acunetix_mcp.config import Config
+from acunetix_mcp.server import mcp, create_server  # noqa: E402
+from acunetix_mcp.config import Config               # noqa: E402
+
+
+EXPECTED_TOOLS = {
+    # Targets
+    "acunetix__list_targets",
+    "acunetix__get_target",
+    "acunetix__add_target",
+    # Scans
+    "acunetix__list_scans",
+    "acunetix__start_scan",
+    "acunetix__get_scan_status",
+    "acunetix__abort_scan",
+    "acunetix__get_scan_results",
+    "acunetix__list_scanning_profiles",
+    # Vulnerabilities
+    "acunetix__list_vulnerabilities",
+    "acunetix__get_vulnerability",
+    "acunetix__update_vulnerability_status",
+    "acunetix__list_vulnerability_types",
+    # Reports
+    "acunetix__list_report_templates",
+    "acunetix__generate_report",
+    "acunetix__list_reports",
+    "acunetix__get_report",
+    # Results
+    "acunetix__get_scan_result",
+    "acunetix__get_scan_statistics",
+}
+
+EXPECTED_TOOL_COUNT = len(EXPECTED_TOOLS)  # 19
 
 
 class TestServerCreation:
-    """Test that the MCP server initializes correctly."""
+    """Server initialises correctly without a live Acunetix instance."""
 
     def test_server_instance_exists(self):
         assert mcp is not None
 
     def test_server_name(self):
-        assert mcp.name == "Acunetix MCP Server"
+        assert mcp.name == "acunetix-mcp"
 
     @pytest.mark.asyncio
     async def test_tool_count(self):
         tools = await mcp.list_tools()
-        assert len(tools) == 161, f"Expected 161 tools, got {len(tools)}"
+        names = {t.name for t in tools}
+        assert len(tools) == EXPECTED_TOOL_COUNT, (
+            f"Expected {EXPECTED_TOOL_COUNT} tools, got {len(tools)}.\n"
+            f"Extra:   {names - EXPECTED_TOOLS}\n"
+            f"Missing: {EXPECTED_TOOLS - names}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_all_tools_have_acunetix_prefix(self):
+        tools = await mcp.list_tools()
+        bad = [t.name for t in tools if not t.name.startswith("acunetix__")]
+        assert not bad, f"Tools without namespace prefix: {bad}"
 
     @pytest.mark.asyncio
     async def test_all_expected_tools_registered(self):
         tools = await mcp.list_tools()
         tool_names = {t.name for t in tools}
-
-        # Core tools that must exist
-        expected = {
-            # Targets
-            "get_targets", "add_target", "get_target", "update_target",
-            "remove_target", "configure_target",
-            # Scans
-            "get_scans", "schedule_scan", "get_scan", "abort_scan",
-            "resume_scan", "trigger_scan",
-            # Vulnerabilities
-            "get_vulnerabilities", "get_vulnerability_details",
-            "set_vulnerability_status",
-            # Reports
-            "get_reports", "generate_new_report", "get_report_templates",
-            "download_report",
-            # New tools
-            "upload_login_sequence", "download_login_sequence",
-            "upload_client_certificate", "upload_import_file",
-            "download_sensor", "get_issue_tracker_issue_types_by_query",
-        }
-
-        missing = expected - tool_names
+        missing = EXPECTED_TOOLS - tool_names
         assert not missing, f"Missing tools: {missing}"
+
+    @pytest.mark.asyncio
+    async def test_all_tools_have_description(self):
+        """Every tool must have a non-empty docstring for LLM discovery."""
+        tools = await mcp.list_tools()
+        no_desc = [t.name for t in tools if not (t.description or "").strip()]
+        assert not no_desc, f"Tools without description: {no_desc}"
 
 
 class TestConfig:
-    """Test configuration loading."""
+    """Configuration loading and validation."""
 
     def test_config_has_required_fields(self):
         cfg = Config()
@@ -84,4 +113,17 @@ class TestConfig:
         cfg = Config()
         cfg.ACUNETIX_BASE_URL = "https://example.com/api/v1"
         cfg.ACUNETIX_API_KEY = "valid-key"
-        cfg.validate()  # Should not raise
+        cfg.validate()  # must not raise
+
+    def test_import_does_not_crash_without_env(self, monkeypatch):
+        """Config module must not raise on import even if env vars are missing."""
+        # Temporarily remove vars from the Config class-level values
+        cfg = Config()
+        cfg.ACUNETIX_BASE_URL = ""
+        cfg.ACUNETIX_API_KEY = ""
+        # validate() should raise, but object creation must not
+        with pytest.raises(ValueError):
+            cfg.validate()
+        # The module-level singleton must still exist
+        from acunetix_mcp.config import config as module_config
+        assert module_config is not None

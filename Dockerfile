@@ -25,14 +25,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install system deps and create non-root user
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system acunetix \
     && useradd --system --gid acunetix --create-home --home-dir /home/acunetix acunetix
 
-# Copy built wheel from builder and install
 COPY --from=builder /dist/*.whl /tmp/
 RUN python -m pip install --no-cache-dir /tmp/*.whl \
     && rm -f /tmp/*.whl
@@ -41,7 +39,8 @@ USER acunetix
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:8000/mcp || exit 1
 
-ENTRYPOINT ["acunetix-mcp-server"]
+# Docker always uses HTTP transport (--http flag)
+ENTRYPOINT ["acunetix-mcp-server", "--http"]

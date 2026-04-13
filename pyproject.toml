@@ -4,15 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "acunetix-mcp-server"
-version = "1.0.0"
-description = "Full-coverage MCP Server for Acunetix Scanner API"
+version = "2.0.0"
+description = "Acunetix MCP Server — structured tools for the Acunetix Scanner API"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=2.3.0",
     "httpx>=0.27.0",
-    "uvicorn[standard]>=0.30.0",
     "python-dotenv>=1.0.0",
+    # uvicorn only needed for --http transport (Docker/remote mode)
+    "uvicorn[standard]>=0.30.0",
 ]
 
 [project.scripts]

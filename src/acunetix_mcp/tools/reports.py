@@ -1,4 +1,4 @@
-"""Report and export management MCP tools."""
+"""Report management tools — templates, generate, list, get."""
 
 from typing import Any, Dict, List, Optional
 import fastmcp
@@ -6,44 +6,49 @@ import fastmcp
 from ..client import acunetix
 
 
-def register_report_tools(mcp: fastmcp.FastMCP):
+def register_report_tools(mcp: fastmcp.FastMCP) -> None:
 
-    @mcp.tool()
-    async def get_report_templates() -> Dict[str, Any]:
-        """
-        Get all available Report Templates.
-        Use template_id from this list when generating reports.
-        Common templates: Executive Summary, Developer Report, Quick Report,
-        Compliance (PCI DSS, HIPAA, ISO 27001, etc.)
+    @mcp.tool(name="acunetix__list_report_templates")
+    async def list_report_templates() -> Dict[str, Any]:
+        """List all available report templates.
+
+        Call this first to find the template_id you need before calling
+        acunetix__generate_report.
+
+        Common templates include: Executive Summary, Developer Report,
+        Quick Report, Affected Items, Compliance reports (PCI DSS, HIPAA,
+        ISO 27001, OWASP Top 10, etc.).
+
+        Returns:
+            List of templates with template_id, name, and report type.
         """
         return await acunetix.get("/report_templates")
 
-    @mcp.tool()
-    async def get_reports(
-        cursor: Optional[str] = None,
-        limit: Optional[int] = None,
-        query: Optional[str] = None,
-        sort: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Get a list of all generated Reports.
-        """
-        return await acunetix.get(
-            "/reports",
-            params={"c": cursor, "l": limit, "q": query, "s": sort},
-        )
-
-    @mcp.tool()
-    async def generate_new_report(
+    @mcp.tool(name="acunetix__generate_report")
+    async def generate_report(
         template_id: str,
         source_type: str,
         source_id_list: List[str],
     ) -> Dict[str, Any]:
-        """
-        Generate a new Report.
-        template_id: ID from get_report_templates (e.g., report template UUID)
-        source_type: 'scan', 'target', 'scan_result'
-        source_id_list: List of scan/target/result IDs to include in the report
+        """Generate a new report for one or more scans or targets.
+
+        Args:
+            template_id:    Template UUID from acunetix__list_report_templates.
+            source_type:    What the report covers:
+                            'scan'        — one or more scan UUIDs
+                            'target'      — one or more target UUIDs
+                            'scan_result' — one or more scan result session UUIDs
+            source_id_list: List of UUIDs matching the source_type.
+
+        Returns:
+            Report object with report_id. Use acunetix__get_report to check
+            status and retrieve the download descriptor once generation is done.
+
+        Example:
+            Generate a PDF for the last scan of target X:
+              template_id    = "..."   (from list_report_templates)
+              source_type    = "scan"
+              source_id_list = ["<scan_uuid>"]
         """
         return await acunetix.post(
             "/reports",
@@ -56,98 +61,39 @@ def register_report_tools(mcp: fastmcp.FastMCP):
             },
         )
 
-    @mcp.tool()
-    async def get_report(report_id: str) -> Dict[str, Any]:
+    @mcp.tool(name="acunetix__list_reports")
+    async def list_reports(
+        limit: Optional[int] = 20,
+        offset: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """List all generated reports.
+
+        Args:
+            limit:  Max reports to return (default 20).
+            offset: Pagination cursor.
+
+        Returns:
+            List of report objects with report_id, template name, status
+            ('processing' | 'completed' | 'failed'), and creation date.
         """
-        Get details and download links for a specific Report.
+        params: Dict[str, Any] = {"l": limit}
+        if offset:
+            params["c"] = offset
+        return await acunetix.get("/reports", params=params)
+
+    @mcp.tool(name="acunetix__get_report")
+    async def get_report(report_id: str) -> Dict[str, Any]:
+        """Get details and download information for a specific report.
+
+        Once status is 'completed', the response includes a 'download'
+        descriptor list. Share those descriptors with the user or use them
+        to retrieve the actual PDF/HTML file.
+
+        Args:
+            report_id: UUID of the report (from acunetix__list_reports or
+                       acunetix__generate_report).
+
+        Returns:
+            Report object including status and download descriptors.
         """
         return await acunetix.get(f"/reports/{report_id}")
-
-    @mcp.tool()
-    async def remove_report(report_id: str) -> Dict[str, Any]:
-        """
-        Delete a specific Report.
-        """
-        return await acunetix.delete(f"/reports/{report_id}")
-
-    @mcp.tool()
-    async def remove_reports(report_ids: List[str]) -> Dict[str, Any]:
-        """
-        Delete multiple Reports at once.
-        """
-        return await acunetix.post(
-            "/reports/delete",
-            body={"id_list": report_ids},
-        )
-
-    @mcp.tool()
-    async def repeat_report(report_id: str) -> Dict[str, Any]:
-        """
-        Re-generate an existing Report (useful after new scans).
-        """
-        return await acunetix.post(f"/reports/{report_id}/repeat")
-
-    @mcp.tool()
-    async def get_export_types() -> Dict[str, Any]:
-        """
-        Get all available Export Types (e.g., XML, JSON, CSV, PDF formats for
-        specific security tools like OWASP ZAP, Metasploit, etc.).
-        """
-        return await acunetix.get("/export_types")
-
-    @mcp.tool()
-    async def create_export(
-        export_id_type: str,
-        source_type: str,
-        source_id_list: List[str],
-    ) -> Dict[str, Any]:
-        """
-        Export scan data in a specific format.
-        export_id_type: Export type ID from get_export_types
-        source_type: 'scan', 'target', 'scan_result', 'vulnerability'
-        source_id_list: List of IDs to export
-        """
-        return await acunetix.post(
-            "/exports",
-            body={
-                "export_id": export_id_type,
-                "source": {
-                    "list_type": source_type,
-                    "id_list": source_id_list,
-                },
-            },
-        )
-
-    @mcp.tool()
-    async def get_export(export_id: str) -> Dict[str, Any]:
-        """
-        Get details and download link for a specific Export.
-        """
-        return await acunetix.get(f"/exports/{export_id}")
-
-    @mcp.tool()
-    async def remove_export(export_id: str) -> Dict[str, Any]:
-        """
-        Delete a specific Export.
-        """
-        return await acunetix.delete(f"/exports/{export_id}")
-
-    @mcp.tool()
-    async def remove_exports(export_ids: List[str]) -> Dict[str, Any]:
-        """
-        Delete multiple Exports at once.
-        """
-        return await acunetix.post(
-            "/exports/delete",
-            body={"id_list": export_ids},
-        )
-
-    @mcp.tool()
-    async def download_report(descriptor: str) -> Dict[str, Any]:
-        """
-        Download a generated Report file (PDF/HTML).
-        descriptor: The download descriptor from get_report response
-        (found in the 'download' field of the report details).
-        Returns the file as base64-encoded data.
-        """
-        return await acunetix.download(f"/reports/download/{descriptor}")
