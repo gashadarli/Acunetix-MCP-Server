@@ -1,92 +1,99 @@
-"""Target management tools — acunetix__list_targets, acunetix__get_target, acunetix__add_target."""
+"""Target and target group MCP tools."""
 
-from typing import Any, Dict, Optional
+from __future__ import annotations
+
+from typing import Any
+
 import fastmcp
 
+from ..audit import audit_event
 from ..client import acunetix
+from ..policy import PolicyEngine, policy_error
+from .common import validate_limit, validate_url, validate_uuid
 
 
 def register_target_tools(mcp: fastmcp.FastMCP) -> None:
-
-    @mcp.tool(name="acunetix__list_targets")
+    @mcp.tool(name="list_targets")
     async def list_targets(
-        search: Optional[str] = None,
-        limit: Optional[int] = 50,
-        offset: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """List all scan targets in Acunetix.
-
-        Use this to get the target inventory — addresses, criticalities,
-        last scan dates, and target IDs needed for starting scans.
-
-        Args:
-            search: Filter targets whose address or description contains this
-                    string (case-insensitive substring). For example: 'sima',
-                    'azincloud', 'example.com'.
-            limit:  Max number of targets to return (default 50).
-            offset: Pagination cursor from a previous response (pass the
-                    'next_cursor' value to get the next page).
-
-        Returns:
-            {
-              "success": true,
-              "data": {
-                "targets": [
-                  {
-                    "target_id": "uuid",
-                    "address": "https://example.com",
-                    "description": "...",
-                    "criticality": 30,          // 0=none 10=low 20=med 30=high 40=critical
-                    "last_scan_date": "2025-01-01T00:00:00Z" | null,
-                    "continuous_scan": false
-                  }, ...
-                ],
-                "pagination": { "next_cursor": "...", "count": 50 }
-              }
-            }
-        """
-        params: Dict[str, Any] = {"l": limit}
+        search: str | None = None,
+        limit: int | None = 50,
+        offset: str | None = None,
+    ) -> dict[str, Any]:
+        """List Acunetix targets with optional text search and pagination."""
+        params: dict[str, Any] = {"l": validate_limit(limit)}
         if search:
             params["q"] = f"text:{search}"
         if offset:
             params["c"] = offset
         return await acunetix.get("/targets", params=params)
 
-    @mcp.tool(name="acunetix__get_target")
-    async def get_target(target_id: str) -> Dict[str, Any]:
-        """Get detailed information about a single scan target.
-
-        Args:
-            target_id: The UUID of the target (from acunetix__list_targets).
-
-        Returns:
-            Full target object including address, description, criticality,
-            tags, scan schedule, and sensor settings.
-        """
+    @mcp.tool(name="get_target")
+    async def get_target(target_id: str) -> dict[str, Any]:
+        """Get a single Acunetix target by target UUID."""
+        error = validate_uuid(target_id, "target_id")
+        if error:
+            return error
         return await acunetix.get(f"/targets/{target_id}")
 
-    @mcp.tool(name="acunetix__add_target")
-    async def add_target(
+    @mcp.tool(name="list_target_groups")
+    async def list_target_groups(
+        search: str | None = None,
+        limit: int | None = 50,
+        offset: str | None = None,
+    ) -> dict[str, Any]:
+        """List Acunetix target groups with optional text search."""
+        params: dict[str, Any] = {"l": validate_limit(limit)}
+        if search:
+            params["q"] = f"text:{search}"
+        if offset:
+            params["c"] = offset
+        return await acunetix.get("/target_groups", params=params)
+
+    @mcp.tool(name="get_target_group")
+    async def get_target_group(group_id: str) -> dict[str, Any]:
+        """Get a single Acunetix target group by group UUID."""
+        error = validate_uuid(group_id, "group_id")
+        if error:
+            return error
+        return await acunetix.get(f"/target_groups/{group_id}")
+
+    @mcp.tool(name="create_target")
+    async def create_target(
         address: str,
-        description: Optional[str] = None,
-        criticality: Optional[int] = 10,
-    ) -> Dict[str, Any]:
-        """Create a new scan target in Acunetix.
+        description: str | None = None,
+        criticality: int = 10,
+        confirmation: bool = False,
+    ) -> dict[str, Any]:
+        """Create an Acunetix target after policy and confirmation checks."""
+        url_error = validate_url(address)
+        if url_error:
+            return url_error
 
-        Args:
-            address:     Full URL of the target application, e.g.
-                         'https://app.example.com'. Include scheme and port
-                         if non-standard.
-            description: Optional human-readable label for this target.
-            criticality: Business criticality score:
-                         0=none, 10=low (default), 20=medium,
-                         30=high, 40=critical.
+        if criticality not in {0, 10, 20, 30, 40}:
+            return {
+                "success": False,
+                "error": {
+                    "message": "criticality must be one of 0, 10, 20, 30, 40.",
+                    "type": "ValidationError",
+                },
+            }
 
-        Returns:
-            The newly created target object, including its target_id which
-            you need to start a scan.
-        """
-        body: Dict[str, Any] = {
+        policy = PolicyEngine()
+        decision = policy.check_action(
+            "create_target",
+            confirmed=confirmation,
+            address=address,
+        )
+        audit_event(
+            "create_target",
+            allowed=decision.allowed,
+            reason=decision.reason,
+            details={"address": address, "criticality": criticality},
+        )
+        if not decision.allowed:
+            return policy_error(decision)
+
+        body: dict[str, Any] = {
             "address": address,
             "type": "default",
             "criticality": criticality,

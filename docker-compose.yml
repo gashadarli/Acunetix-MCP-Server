@@ -1,20 +1,27 @@
 services:
-  acunetix-mcp-server:
+  acunetix-mcp:
+    image: acunetix-mcp:latest
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: acunetix-mcp-server
     restart: unless-stopped
     ports:
-      - "${MCP_SERVER_PORT:-8000}:8000"
+      - "${MCP_SERVER_PORT:-8080}:8080"
     environment:
-      - ACUNETIX_BASE_URL=${ACUNETIX_BASE_URL}
-      - ACUNETIX_API_KEY=${ACUNETIX_API_KEY}
-      - VERIFY_SSL=${VERIFY_SSL:-false}
-      - MCP_SERVER_HOST=0.0.0.0
-      - MCP_SERVER_PORT=8000
+      ACUNETIX_BASE_URL: ${ACUNETIX_BASE_URL:-https://10.0.244.136/}
+      ACUNETIX_API_KEY: ${ACUNETIX_API_KEY:-}
+      ACUNETIX_VERIFY_SSL: ${ACUNETIX_VERIFY_SSL:-false}
+      ACUNETIX_READ_ONLY: ${ACUNETIX_READ_ONLY:-true}
+      ACUNETIX_REQUIRE_CONFIRMATION: ${ACUNETIX_REQUIRE_CONFIRMATION:-true}
+      ACUNETIX_TARGET_ALLOWLIST: ${ACUNETIX_TARGET_ALLOWLIST:-}
+      ACUNETIX_TIMEOUT_SECONDS: ${ACUNETIX_TIMEOUT_SECONDS:-30}
+      ACUNETIX_MAX_CONCURRENT_SCAN_STARTS: ${ACUNETIX_MAX_CONCURRENT_SCAN_STARTS:-1}
+      MCP_TRANSPORT: http
+      MCP_SERVER_HOST: 0.0.0.0
+      MCP_SERVER_PORT: 8080
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3

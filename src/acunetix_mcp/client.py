@@ -1,163 +1,192 @@
-"""Async HTTP client wrapper for the Acunetix REST API.
+"""Async Acunetix REST API client used by MCP tools."""
 
-Handles:
-- Authentication via X-Auth header
-- SSL verification toggle (off by default for self-signed certs)
-- Lazy config validation (validated on first HTTP call, not on import)
-- API key masking in error messages
-- Consistent response envelope: {"success": bool, "data": ..., "error": ...}
-"""
+from __future__ import annotations
 
-import warnings
-from typing import Any, Dict, Optional
+from typing import Any, Mapping
 
 import httpx
 
-from .config import config
+from .config import Settings, load_settings, mask_secret
 
-# Suppress SSL warnings for self-signed certificates
-warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+
+JsonDict = dict[str, Any]
+
+
+def _sanitize(value: Any, secret: str | None) -> Any:
+    """Recursively redact secrets from structured response/error values."""
+    if isinstance(value, str):
+        return mask_secret(value, secret)
+    if isinstance(value, list):
+        return [_sanitize(item, secret) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize(item, secret) for item in value)
+    if isinstance(value, Mapping):
+        sanitized: JsonDict = {}
+        for key, item in value.items():
+            if str(key).lower() in {"x-auth", "authorization", "api_key", "api-key"}:
+                sanitized[str(key)] = "***REDACTED***"
+            else:
+                sanitized[str(key)] = _sanitize(item, secret)
+        return sanitized
+    return value
 
 
 class AcunetixClient:
-    """Async HTTP client for the Acunetix Scanner API."""
+    """Small typed wrapper around the Acunetix REST API.
 
-    _validated: bool = False
+    The client intentionally exposes HTTP verbs only to internal tool modules.
+    No generic MCP proxy tool is registered.
+    """
 
-    def __init__(self) -> None:
-        self.base_url: str = ""  # populated lazily after validation
-        self.verify_ssl: bool = False
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.settings = settings
+        self._transport = transport
 
-    def _lazy_init(self) -> None:
-        """Validate config and set up client parameters on first use.
+    def _settings(self) -> Settings:
+        settings = self.settings or load_settings()
+        settings.validate()
+        return settings
 
-        Called automatically before every HTTP request.
-        Raises ValueError with a human-friendly message if config is missing.
-        """
-        if not self._validated:
-            config.validate()            # may raise ValueError
-            self.base_url = config.ACUNETIX_BASE_URL.rstrip("/")
-            self.verify_ssl = config.VERIFY_SSL
-            AcunetixClient._validated = True
+    def _timeout(self, settings: Settings) -> httpx.Timeout:
+        return httpx.Timeout(settings.request_timeout_seconds)
 
-    def _http_client(self) -> httpx.AsyncClient:
-        """Create a configured httpx async client."""
+    def _http_client(self, settings: Settings) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             headers={
-                "X-Auth": config.ACUNETIX_API_KEY,
+                "X-Auth": settings.acunetix_api_key,
+                "Accept": "application/json",
                 "Content-Type": "application/json",
             },
-            verify=self.verify_ssl,
-            timeout=60.0,
+            verify=settings.acunetix_verify_ssl,
+            timeout=self._timeout(settings),
+            transport=self._transport,
         )
 
-    def _safe_error(self, response: httpx.Response) -> Dict[str, Any]:
-        """Parse an error response, masking the API key if it appears."""
+    def _parse_body(self, response: httpx.Response, settings: Settings) -> Any:
+        if not response.content:
+            return None
         try:
-            body = response.json()
-        except Exception:
-            body = {"message": response.text}
+            return _sanitize(response.json(), settings.acunetix_api_key)
+        except ValueError:
+            return _sanitize(response.text, settings.acunetix_api_key)
 
-        # Safety: never expose the raw API key in tool output
-        body_str = str(body)
-        if config.ACUNETIX_API_KEY and config.ACUNETIX_API_KEY in body_str:
-            body_str = body_str.replace(config.ACUNETIX_API_KEY, "***REDACTED***")
-            body = {"message": body_str}
-
-        return {
-            "success": False,
+    def _handle_response(self, response: httpx.Response, settings: Settings) -> JsonDict:
+        body = self._parse_body(response, settings)
+        result: JsonDict = {
+            "success": 200 <= response.status_code < 300,
             "status_code": response.status_code,
-            "error": body,
         }
 
-    def _handle_response(self, response: httpx.Response) -> Dict[str, Any]:
-        """Convert an httpx Response to a consistent result dict."""
-        if response.status_code in (200, 201):
-            try:
-                return {"success": True, "data": response.json()}
-            except Exception:
-                return {"success": True, "data": response.text}
-        elif response.status_code in (203, 204):
-            return {"success": True, "data": None, "message": "Operation completed successfully"}
-        elif response.status_code == 302:
-            return {
-                "success": True,
-                "data": None,
-                "location": response.headers.get("Location"),
-                "message": "Redirect",
-            }
-        else:
-            return self._safe_error(response)
+        if result["success"]:
+            result["data"] = body
+            location = response.headers.get("Location")
+            if location:
+                result["location"] = _sanitize(location, settings.acunetix_api_key)
+            return result
 
-    # ── Public HTTP methods ───────────────────────────────────────────────────
+        result["error"] = {
+            "message": self._error_message(body, response.status_code),
+            "details": body,
+        }
+        return result
 
-    async def get(
+    @staticmethod
+    def _error_message(body: Any, status_code: int) -> str:
+        if isinstance(body, Mapping):
+            for key in ("message", "reason", "error", "description"):
+                if key in body and body[key]:
+                    return str(body[key])
+        if isinstance(body, str) and body.strip():
+            return body.strip()
+        return f"Acunetix API returned HTTP {status_code}"
+
+    def _exception_result(self, exc: Exception, settings: Settings | None = None) -> JsonDict:
+        secret = settings.acunetix_api_key if settings else None
+        return {
+            "success": False,
+            "status_code": None,
+            "error": {
+                "message": _sanitize(str(exc), secret),
+                "type": exc.__class__.__name__,
+            },
+        }
+
+    async def request(
         self,
+        method: str,
         path: str,
-        params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Perform a GET request."""
-        self._lazy_init()
-        async with self._http_client() as client:
-            response = await client.get(
-                f"{self.base_url}{path}",
-                params={k: v for k, v in (params or {}).items() if v is not None},
-            )
-            return self._handle_response(response)
+        *,
+        params: Mapping[str, Any] | None = None,
+        body: Mapping[str, Any] | None = None,
+    ) -> JsonDict:
+        settings: Settings | None = None
+        try:
+            settings = self._settings()
+            clean_path = path if path.startswith("/") else f"/{path}"
+            clean_params = {
+                key: value
+                for key, value in (params or {}).items()
+                if value is not None and value != ""
+            }
+            async with self._http_client(settings) as client:
+                response = await client.request(
+                    method=method.upper(),
+                    url=f"{settings.api_base_url}{clean_path}",
+                    params=clean_params,
+                    json=body,
+                )
+            return self._handle_response(response, settings)
+        except (ValueError, httpx.HTTPError) as exc:
+            return self._exception_result(exc, settings)
+
+    async def get(self, path: str, params: Mapping[str, Any] | None = None) -> JsonDict:
+        return await self.request("GET", path, params=params)
 
     async def post(
         self,
         path: str,
-        body: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Perform a POST request."""
-        self._lazy_init()
-        async with self._http_client() as client:
-            response = await client.post(
-                f"{self.base_url}{path}",
-                json=body,
-                params={k: v for k, v in (params or {}).items() if v is not None},
-            )
-            return self._handle_response(response)
+        body: Mapping[str, Any] | None = None,
+        params: Mapping[str, Any] | None = None,
+    ) -> JsonDict:
+        return await self.request("POST", path, params=params, body=body)
 
-    async def patch(
-        self,
-        path: str,
-        body: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Perform a PATCH request."""
-        self._lazy_init()
-        async with self._http_client() as client:
-            response = await client.patch(f"{self.base_url}{path}", json=body)
-            return self._handle_response(response)
+    async def put(self, path: str, body: Mapping[str, Any] | None = None) -> JsonDict:
+        return await self.request("PUT", path, body=body)
 
-    async def put(
-        self,
-        path: str,
-        body: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Perform a PUT request."""
-        self._lazy_init()
-        async with self._http_client() as client:
-            response = await client.put(f"{self.base_url}{path}", json=body)
-            return self._handle_response(response)
+    async def patch(self, path: str, body: Mapping[str, Any] | None = None) -> JsonDict:
+        return await self.request("PATCH", path, body=body)
 
-    async def delete(
-        self,
-        path: str,
-        body: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Perform a DELETE request (with optional JSON body)."""
-        self._lazy_init()
-        async with self._http_client() as client:
-            response = await client.request(
-                method="DELETE",
-                url=f"{self.base_url}{path}",
-                json=body,
-            )
-            return self._handle_response(response)
+    async def delete(self, path: str, body: Mapping[str, Any] | None = None) -> JsonDict:
+        return await self.request("DELETE", path, body=body)
+
+    async def health(self) -> JsonDict:
+        """Check configuration and authenticated read-only API reachability."""
+        settings: Settings | None = None
+        try:
+            settings = self._settings()
+        except ValueError as exc:
+            return {
+                "success": False,
+                "configured": False,
+                "error": {"message": str(exc), "type": exc.__class__.__name__},
+            }
+
+        result = await self.get("/target_groups", params={"l": 1})
+        health: JsonDict = {
+            "success": bool(result.get("success")),
+            "configured": True,
+            "api_base_url": settings.api_base_url,
+            "verify_ssl": settings.acunetix_verify_ssl,
+            "read_only": settings.read_only,
+            "api_status_code": result.get("status_code"),
+        }
+        if not result.get("success"):
+            health["error"] = result.get("error")
+        return health
 
 
-# Module-level singleton — shared by all tool modules.
 acunetix = AcunetixClient()

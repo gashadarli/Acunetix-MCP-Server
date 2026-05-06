@@ -1,0 +1,22 @@
+acunetix:
+  base_url: "https://10.0.244.136/"
+  api_key: ""
+  verify_ssl: false
+  timeout_seconds: 30
+
+mcp:
+  transport: "stdio"
+  host: "0.0.0.0"
+  port: 8080
+
+policy:
+  read_only: true
+  require_confirmation: true
+  allowed_targets: []
+  max_concurrent_scan_starts: 1
+
+audit:
+  log_path: ""
+
+logging:
+  level: "INFO"

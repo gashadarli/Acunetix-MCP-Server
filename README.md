@@ -1,261 +1,310 @@
 # Acunetix MCP Server
 
-MCP (Model Context Protocol) server for the **Acunetix Web Vulnerability Scanner API**.
-
-Allows AI assistants (OpenClaw, Claude, Cursor, Gemini) to interact with Acunetix through
-structured tool calls — without ever making raw HTTP requests to private/internal addresses
-themselves. The MCP server acts as the authenticated bridge.
-
-## Why this exists
-
-AI runtimes block direct HTTP calls to private IPs (`10.x.x.x`, `localhost`, etc.).
-The MCP server runs locally (or in Docker) with access to your Acunetix instance,
-and the AI calls structured tools instead:
+Production-oriented, model-agnostic MCP server for the Acunetix REST API.
+It exposes typed MCP tools for AI clients instead of a dangerous raw HTTP proxy.
 
 ```
-AI client  ──(MCP tools)──▶  acunetix-mcp  ──(HTTPS + X-Auth)──▶  Acunetix
+AI Client
+  -> MCP transport layer
+      -> typed MCP tools
+          -> policy and audit layer
+              -> Acunetix API client
+                  -> Acunetix REST API
 ```
 
-## Available Tools (19 total)
+Supported clients include Claude Desktop, Gemini CLI, ChatGPT remote MCP, Codex,
+OpenClaw, local MCP runners, and other MCP-compatible clients.
 
-All tool names are prefixed with `acunetix__` to avoid conflicts with other MCP servers.
+## Tool Coverage
 
-| Tool | Description |
-|------|-------------|
-| `acunetix__list_targets` | List / search scan targets |
-| `acunetix__get_target` | Detailed info for one target |
-| `acunetix__add_target` | Create a new scan target |
-| `acunetix__list_scans` | List scans (filter by target/status) |
-| `acunetix__start_scan` | Start a scan immediately |
-| `acunetix__get_scan_status` | Poll status of a running/completed scan |
-| `acunetix__abort_scan` | Stop a running scan |
-| `acunetix__get_scan_results` | Scan session history |
-| `acunetix__list_scanning_profiles` | Available scan profile IDs |
-| `acunetix__list_vulnerabilities` | List vulnerabilities (filter by severity/status) |
-| `acunetix__get_vulnerability` | Full details + remediation for one finding |
-| `acunetix__update_vulnerability_status` | Mark open / fixed / false_positive / ignored |
-| `acunetix__list_vulnerability_types` | Vulnerability type breakdown |
-| `acunetix__list_report_templates` | Available report format templates |
-| `acunetix__generate_report` | Generate a PDF/HTML report |
-| `acunetix__list_reports` | List generated reports |
-| `acunetix__get_report` | Report details + download descriptor |
-| `acunetix__get_scan_result` | One scan session's metadata |
-| `acunetix__get_scan_statistics` | Vuln counts, URLs scanned, timing |
+The server registers fixed MCP tools for every operation documented in
+`Acunetix-API-Documentation.yaml`. The current coverage report is:
 
----
+```text
+documented_operations: 161
+implemented_operations: 161
+missing_operations: 0
+registered_tools: 168
+```
 
-## Quick Start
+Common read-only tools:
 
-### 1. Configure
+- `acunetix_health`
+- `list_targets`
+- `get_target`
+- `list_target_groups`
+- `get_target_group`
+- `list_scans`
+- `get_scan_status`
+- `list_scanning_profiles`
+- `list_vulnerabilities`
+- `get_vulnerability`
+- `list_report_templates`
+- `list_reports`
+- `get_report`
+- `list_users`
+- `get_user`
+- `list_roles`
+- `list_wafs`
+- `list_workers`
+- `download_report`
+
+Common action tools:
+
+- `create_target`
+- `start_scan`
+- `stop_scan`
+- `generate_report`
+- `create_user`
+- `update_user`
+- `delete_user`
+- `update_vulnerability_status`
+
+Action tools are blocked by default because `ACUNETIX_READ_ONLY=true`. To allow
+them, set `ACUNETIX_READ_ONLY=false`; callers must still pass
+`confirmation=true` unless `ACUNETIX_REQUIRE_CONFIRMATION=false` is set.
+
+There is no generic `acunetix_request(method, path, body)` proxy tool.
+
+The broad OpenAPI coverage tools use a consistent argument shape:
+
+```json
+{
+  "path_params": {"user_id": "11111111-1111-1111-1111-111111111111"},
+  "query": {"q": "text:admin"},
+  "body": {"enabled": true},
+  "limit": 50,
+  "offset": "cursor-value",
+  "confirmation": true
+}
+```
+
+For example:
+
+- "get user list" maps to `list_users` and calls `GET /users`.
+- "show WAFs" maps to `list_wafs` and calls `GET /wafs`.
+- "download report descriptor X" maps to `download_report` and calls
+  `GET /reports/download/{descriptor}`.
+- "update vulnerability status" maps to `update_vulnerability_status`, requires
+  confirmation, and calls `PUT /vulnerabilities/{vuln_id}/status`.
+
+## Configuration
+
+Copy the examples and fill in your own secret locally:
 
 ```bash
 cp .env.example .env
-# Edit .env with your Acunetix URL and API key
+cp config.example.yaml config.yaml
 ```
+
+Environment variables override `config.yaml`.
+
+Key settings:
 
 ```env
-ACUNETIX_BASE_URL=https://10.0.244.136/api/v1
-ACUNETIX_API_KEY=1986ad8c...
-VERIFY_SSL=false
+ACUNETIX_BASE_URL=https://10.0.244.136/
+ACUNETIX_API_KEY=replace-with-your-api-key
+ACUNETIX_VERIFY_SSL=false
+ACUNETIX_READ_ONLY=true
+ACUNETIX_REQUIRE_CONFIRMATION=true
+ACUNETIX_TARGET_ALLOWLIST=
+MCP_TRANSPORT=stdio
+MCP_SERVER_PORT=8080
 ```
 
-> **Get your API key**: Acunetix UI → top-right menu → **Profile** → **API Key**
+`ACUNETIX_BASE_URL` may be either the Acunetix root URL or the full API base URL.
+The server normalizes `https://host/` to `https://host/api/v1`.
 
-### 2. Install
+Never place real API keys in source code, tests, README snippets, or committed
+config. `.env` and `config.yaml` are ignored by Git.
+
+## Docker
+
+Build:
 
 ```bash
-pip install -e .
+docker compose build
 ```
 
-### 3. Verify it works
+Run with Docker Compose:
 
 ```bash
-# Quick sanity check — should print 19 tools, all starting with acunetix__
-ACUNETIX_BASE_URL=https://10.0.244.136/api/v1 \
-ACUNETIX_API_KEY=your-key \
-python -c "
-import asyncio, os
-from acunetix_mcp.server import mcp
-tools = asyncio.run(mcp.list_tools())
-for t in tools:
-    print(t.name)
-print()
-print(f'Total: {len(tools)} tools')
-"
+ACUNETIX_API_KEY="$ACUNETIX_API_KEY" docker compose up
 ```
 
----
+Run stdio mode in Docker for local MCP clients:
 
-## MCP Client Configuration
+```bash
+docker run --rm -i \
+  -e ACUNETIX_BASE_URL="https://10.0.244.136/" \
+  -e ACUNETIX_API_KEY="$ACUNETIX_API_KEY" \
+  -e ACUNETIX_VERIFY_SSL="false" \
+  acunetix-mcp:latest \
+  --transport stdio
+```
 
-### OpenClaw / Claude Desktop / Cursor (stdio — recommended)
+Run HTTP mode:
 
-The server runs as a **subprocess** — no port, no Docker needed.
+```bash
+docker run --rm \
+  -p 8080:8080 \
+  -e ACUNETIX_BASE_URL="https://10.0.244.136/" \
+  -e ACUNETIX_API_KEY="$ACUNETIX_API_KEY" \
+  -e ACUNETIX_VERIFY_SSL="false" \
+  -e MCP_TRANSPORT="http" \
+  acunetix-mcp:latest
+```
 
-**Option A — using installed package** (`pip install -e .` was run):
+HTTP endpoints:
+
+- MCP streamable HTTP: `http://localhost:8080/mcp`
+- Container health: `http://localhost:8080/health`
+
+## Claude Desktop
+
+Stdio configuration:
+
+```json
+{
+  "mcpServers": {
+    "acunetix": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-e", "ACUNETIX_BASE_URL=https://10.0.244.136/",
+        "-e", "ACUNETIX_API_KEY",
+        "-e", "ACUNETIX_VERIFY_SSL=false",
+        "acunetix-mcp:latest",
+        "--transport", "stdio"
+      ],
+      "env": {
+        "ACUNETIX_API_KEY": "your-api-key-here"
+      }
+    }
+  }
+}
+```
+
+## Gemini CLI
+
+Example MCP server entry:
 
 ```json
 {
   "mcpServers": {
     "acunetix": {
       "command": "acunetix-mcp-server",
+      "args": ["--transport", "stdio"],
       "env": {
-        "ACUNETIX_BASE_URL": "https://10.0.244.136/api/v1",
+        "ACUNETIX_BASE_URL": "https://10.0.244.136/",
         "ACUNETIX_API_KEY": "your-api-key-here",
-        "VERIFY_SSL": "false"
+        "ACUNETIX_VERIFY_SSL": "false"
       }
     }
   }
 }
 ```
 
-**Option B — using Python directly** (no install needed):
+## ChatGPT Remote MCP / HTTP
+
+Run the server where ChatGPT can reach it over HTTPS. For local testing:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e MCP_TRANSPORT=http \
+  -e ACUNETIX_BASE_URL="https://10.0.244.136/" \
+  -e ACUNETIX_API_KEY="$ACUNETIX_API_KEY" \
+  -e ACUNETIX_VERIFY_SSL=false \
+  acunetix-mcp:latest
+```
+
+Configure the remote MCP URL as:
+
+```text
+https://your-public-host.example.com/mcp
+```
+
+For production remote access, put the container behind TLS and your normal
+authentication or network access controls. Do not expose this service openly.
+
+## Generic MCP Client
+
+Local stdio:
 
 ```json
 {
   "mcpServers": {
     "acunetix": {
       "command": "python",
-      "args": ["-m", "acunetix_mcp.server"],
+      "args": ["-m", "acunetix_mcp.server", "--transport", "stdio"],
       "cwd": "/absolute/path/to/Acunetix-MCP-Server",
       "env": {
-        "ACUNETIX_BASE_URL": "https://10.0.244.136/api/v1",
+        "ACUNETIX_BASE_URL": "https://10.0.244.136/",
         "ACUNETIX_API_KEY": "your-api-key-here",
-        "VERIFY_SSL": "false"
+        "ACUNETIX_VERIFY_SSL": "false"
       }
     }
   }
 }
 ```
 
-**Option C — using uv** (auto dependency management):
-
-```json
-{
-  "mcpServers": {
-    "acunetix": {
-      "command": "uv",
-      "args": [
-        "run",
-        "--directory", "/absolute/path/to/Acunetix-MCP-Server",
-        "acunetix-mcp-server"
-      ],
-      "env": {
-        "ACUNETIX_BASE_URL": "https://10.0.244.136/api/v1",
-        "ACUNETIX_API_KEY": "your-api-key-here",
-        "VERIFY_SSL": "false"
-      }
-    }
-  }
-}
-```
-
-> **Config file locations:**
-> - **Claude Desktop** macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-> - **Claude Desktop** Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-> - **Cursor**: `.cursor/mcp.json` in your project, or `~/.cursor/mcp.json` globally
-> - **OpenClaw**: check Settings → MCP Servers
-
----
-
-### Docker / HTTP Transport
-
-Use this if you want the server running as a persistent HTTP service
-(e.g., shared team instance, or an MCP client that only supports HTTP URLs).
-
-```bash
-# Build and start
-docker compose up -d
-
-# Verify
-curl http://localhost:8000/mcp
-```
-
-MCP client config (HTTP URL mode):
+HTTP:
 
 ```json
 {
   "mcpServers": {
     "acunetix": {
       "type": "http",
-      "url": "http://localhost:8000/mcp"
+      "url": "http://localhost:8080/mcp"
     }
   }
 }
 ```
 
----
+## Tests
 
-## Example AI Conversations
+Install test dependencies:
 
-Once configured, ask your AI assistant:
-
-- *"List all Acunetix targets"*
-- *"Search for targets containing 'azincloud'"*
-- *"Start a Full Scan on target `<uuid>`"*
-- *"What's the status of scan `<uuid>`?"*
-- *"Show me all high and critical vulnerabilities"*
-- *"Mark vulnerability `<uuid>` as false positive"*
-- *"Generate an Executive Summary report for the last scan"*
-
----
-
-## Typical Scan Workflow
-
-```
-1. acunetix__list_targets
-       │ find target_id
-       ▼
-2. acunetix__start_scan(target_id)
-       │ get scan_id
-       ▼
-3. acunetix__get_scan_status(scan_id)   ← poll until status == "completed"
-       │ get result_id from current_result
-       ▼
-4. acunetix__get_scan_statistics(scan_id, result_id)
-       │ see severity counts
-       ▼
-5. acunetix__list_vulnerabilities(target_id=..., severity="high")
-       │ triage findings
-       ▼
-6. acunetix__generate_report(template_id, "scan", [scan_id])
-```
-
----
-
-## Transport Modes
-
-| Mode | When to use | How |
-|------|-------------|-----|
-| **stdio** (default) | OpenClaw, Claude Desktop, Cursor | Config with `command` key |
-| **HTTP** (`--http`) | Docker, shared/remote setups | Config with `url` key |
-
-Run HTTP mode manually:
 ```bash
-acunetix-mcp-server --http
-acunetix-mcp-server --http --port 9000
+pip install -e ".[dev]"
 ```
 
----
+Run unit tests:
 
-## Troubleshooting
-
-**Server not found / "command not found"**
-→ Run `pip install -e .` first, or use the Python direct Option B above.
-
-**"ACUNETIX_BASE_URL is not set"**
-→ Pass env vars in your MCP client config (see examples above), or create a `.env` file.
-
-**SSL certificate error**
-→ Set `VERIFY_SSL=false` in env vars (Acunetix on-prem uses self-signed certs by default).
-
-**"Connection refused" / "Cannot connect"**
-→ Verify Acunetix is running and the URL/port is correct. Test directly:
 ```bash
-curl -k -H "X-Auth: your-api-key" https://10.0.244.136/api/v1/targets
+pytest -v
 ```
 
-**OpenClaw says "fetch request" failed**
-→ This is the exact problem this MCP server solves. OpenClaw cannot call `10.x.x.x`
-directly. Configure the MCP server using the stdio config above — OpenClaw will call
-`acunetix__list_targets` (the tool), not the raw Acunetix URL.
+Print a coverage report from the registered MCP tools:
+
+```bash
+python -c "import asyncio, json; from acunetix_mcp.server import create_server; from acunetix_mcp.tools.openapi_coverage import coverage_report; tools=asyncio.run(create_server().list_tools()); print(json.dumps(coverage_report({t.name for t in tools}), indent=2))"
+```
+
+Run read-only integration tests only when you have a real Acunetix instance:
+
+```bash
+ACUNETIX_BASE_URL="https://10.0.244.136/" \
+ACUNETIX_API_KEY="$ACUNETIX_API_KEY" \
+ACUNETIX_VERIFY_SSL=false \
+pytest tests/test_integration.py -v
+```
+
+Docker smoke checks:
+
+```bash
+docker compose build
+ACUNETIX_API_KEY="$ACUNETIX_API_KEY" docker compose up
+curl http://localhost:8080/health
+python scripts/verify_mcp_http.py --url http://localhost:8080/mcp
+```
+
+## Security Notes
+
+- API keys are sent only as the Acunetix `X-Auth` header.
+- API keys are masked in normalized API errors and audit logs.
+- Action tools are blocked in read-only mode by default.
+- `start_scan` is protected by confirmation, target allowlist checks, and a
+  scan-start concurrency limit.
+- Delete operations are not exposed.
+- Integration tests are read-only and skipped unless credentials are set.

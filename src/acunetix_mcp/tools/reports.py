@@ -1,55 +1,95 @@
-"""Report management tools — templates, generate, list, get."""
+"""Report MCP tools."""
 
-from typing import Any, Dict, List, Optional
+from __future__ import annotations
+
+from typing import Any, Literal
+
 import fastmcp
 
+from ..audit import audit_event
 from ..client import acunetix
+from ..policy import PolicyEngine, policy_error
+from .common import validate_limit, validate_uuid
+
+
+ReportSourceType = Literal["scan", "target", "scan_result"]
 
 
 def register_report_tools(mcp: fastmcp.FastMCP) -> None:
-
-    @mcp.tool(name="acunetix__list_report_templates")
-    async def list_report_templates() -> Dict[str, Any]:
-        """List all available report templates.
-
-        Call this first to find the template_id you need before calling
-        acunetix__generate_report.
-
-        Common templates include: Executive Summary, Developer Report,
-        Quick Report, Affected Items, Compliance reports (PCI DSS, HIPAA,
-        ISO 27001, OWASP Top 10, etc.).
-
-        Returns:
-            List of templates with template_id, name, and report type.
-        """
+    @mcp.tool(name="list_report_templates")
+    async def list_report_templates() -> dict[str, Any]:
+        """List report templates that can be used with generate_report."""
         return await acunetix.get("/report_templates")
 
-    @mcp.tool(name="acunetix__generate_report")
+    @mcp.tool(name="list_reports")
+    async def list_reports(
+        limit: int | None = 20,
+        offset: str | None = None,
+    ) -> dict[str, Any]:
+        """List generated Acunetix reports."""
+        params: dict[str, Any] = {"l": validate_limit(limit)}
+        if offset:
+            params["c"] = offset
+        return await acunetix.get("/reports", params=params)
+
+    @mcp.tool(name="get_report")
+    async def get_report(report_id: str) -> dict[str, Any]:
+        """Get one generated Acunetix report by report UUID."""
+        error = validate_uuid(report_id, "report_id")
+        if error:
+            return error
+        return await acunetix.get(f"/reports/{report_id}")
+
+    @mcp.tool(name="generate_report")
     async def generate_report(
         template_id: str,
-        source_type: str,
-        source_id_list: List[str],
-    ) -> Dict[str, Any]:
-        """Generate a new report for one or more scans or targets.
+        source_type: ReportSourceType,
+        source_id_list: list[str],
+        confirmation: bool = False,
+    ) -> dict[str, Any]:
+        """Generate an Acunetix report after policy and confirmation checks."""
+        template_error = validate_uuid(template_id, "template_id")
+        if template_error:
+            return template_error
+        if source_type not in {"scan", "target", "scan_result"}:
+            return {
+                "success": False,
+                "error": {
+                    "message": "source_type must be scan, target, or scan_result.",
+                    "type": "ValidationError",
+                },
+            }
+        if not source_id_list:
+            return {
+                "success": False,
+                "error": {
+                    "message": "source_id_list must contain at least one UUID.",
+                    "type": "ValidationError",
+                },
+            }
+        for index, source_id in enumerate(source_id_list):
+            source_error = validate_uuid(source_id, f"source_id_list[{index}]")
+            if source_error:
+                return source_error
 
-        Args:
-            template_id:    Template UUID from acunetix__list_report_templates.
-            source_type:    What the report covers:
-                            'scan'        — one or more scan UUIDs
-                            'target'      — one or more target UUIDs
-                            'scan_result' — one or more scan result session UUIDs
-            source_id_list: List of UUIDs matching the source_type.
+        policy = PolicyEngine()
+        decision = policy.check_action(
+            "generate_report",
+            confirmed=confirmation,
+        )
+        audit_event(
+            "generate_report",
+            allowed=decision.allowed,
+            reason=decision.reason,
+            details={
+                "template_id": template_id,
+                "source_type": source_type,
+                "source_count": len(source_id_list),
+            },
+        )
+        if not decision.allowed:
+            return policy_error(decision)
 
-        Returns:
-            Report object with report_id. Use acunetix__get_report to check
-            status and retrieve the download descriptor once generation is done.
-
-        Example:
-            Generate a PDF for the last scan of target X:
-              template_id    = "..."   (from list_report_templates)
-              source_type    = "scan"
-              source_id_list = ["<scan_uuid>"]
-        """
         return await acunetix.post(
             "/reports",
             body={
@@ -60,40 +100,3 @@ def register_report_tools(mcp: fastmcp.FastMCP) -> None:
                 },
             },
         )
-
-    @mcp.tool(name="acunetix__list_reports")
-    async def list_reports(
-        limit: Optional[int] = 20,
-        offset: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """List all generated reports.
-
-        Args:
-            limit:  Max reports to return (default 20).
-            offset: Pagination cursor.
-
-        Returns:
-            List of report objects with report_id, template name, status
-            ('processing' | 'completed' | 'failed'), and creation date.
-        """
-        params: Dict[str, Any] = {"l": limit}
-        if offset:
-            params["c"] = offset
-        return await acunetix.get("/reports", params=params)
-
-    @mcp.tool(name="acunetix__get_report")
-    async def get_report(report_id: str) -> Dict[str, Any]:
-        """Get details and download information for a specific report.
-
-        Once status is 'completed', the response includes a 'download'
-        descriptor list. Share those descriptors with the user or use them
-        to retrieve the actual PDF/HTML file.
-
-        Args:
-            report_id: UUID of the report (from acunetix__list_reports or
-                       acunetix__generate_report).
-
-        Returns:
-            Report object including status and download descriptors.
-        """
-        return await acunetix.get(f"/reports/{report_id}")

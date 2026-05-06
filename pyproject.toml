@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "acunetix-mcp-server"
-version = "2.0.0"
+version = "2.1.0"
 description = "Acunetix MCP Server — structured tools for the Acunetix Scanner API"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,8 +12,15 @@ dependencies = [
     "fastmcp>=2.3.0",
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
-    # uvicorn only needed for --http transport (Docker/remote mode)
+    "PyYAML>=6.0.0",
+    "starlette>=0.37.0",
     "uvicorn[standard]>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
 ]
 
 [project.scripts]
@@ -24,6 +31,9 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.setuptools.package-data]
+acunetix_mcp = ["Acunetix-API-Documentation.yaml"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

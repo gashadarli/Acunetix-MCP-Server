@@ -1,198 +1,215 @@
-"""Scan management tools — start, list, status, abort, results, profiles."""
+"""Scan MCP tools."""
 
-from typing import Any, Dict, Optional
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
 import fastmcp
 
+from ..audit import audit_event
 from ..client import acunetix
+from ..config import load_settings
+from ..policy import PolicyEngine, policy_error
+from .common import validate_limit, validate_uuid
 
-# Well-known built-in scanning profile IDs in Acunetix.
-# Users can also pass a custom profile_id from acunetix__list_scanning_profiles.
+
 PROFILE_FULL_SCAN = "11111111-1111-1111-1111-111111111111"
+VALID_SCAN_STATUSES = {
+    "processing",
+    "scheduled",
+    "running",
+    "pausing",
+    "paused",
+    "completed",
+    "aborted",
+    "failed",
+    "empty",
+}
+
+_scan_start_lock = asyncio.Lock()
+_scan_start_semaphore: asyncio.Semaphore | None = None
+_scan_start_limit: int | None = None
+
+
+async def _scan_semaphore() -> asyncio.Semaphore:
+    global _scan_start_limit, _scan_start_semaphore
+    settings = load_settings()
+    async with _scan_start_lock:
+        if (
+            _scan_start_semaphore is None
+            or _scan_start_limit != settings.max_concurrent_scan_starts
+        ):
+            _scan_start_limit = settings.max_concurrent_scan_starts
+            _scan_start_semaphore = asyncio.Semaphore(_scan_start_limit)
+        return _scan_start_semaphore
+
+
+def _target_address_from_response(response: dict[str, Any]) -> str | None:
+    data = response.get("data")
+    if isinstance(data, dict):
+        address = data.get("address")
+        return str(address) if address else None
+    return None
+
+
+async def _scan_target_id(scan_id: str) -> str | None:
+    response = await acunetix.get(f"/scans/{scan_id}")
+    data = response.get("data")
+    if isinstance(data, dict):
+        target_id = data.get("target_id")
+        if target_id:
+            return str(target_id)
+        target = data.get("target")
+        if isinstance(target, dict) and target.get("target_id"):
+            return str(target["target_id"])
+    return None
 
 
 def register_scan_tools(mcp: fastmcp.FastMCP) -> None:
-
-    @mcp.tool(name="acunetix__list_scans")
+    @mcp.tool(name="list_scans")
     async def list_scans(
-        target_id: Optional[str] = None,
-        status: Optional[str] = None,
-        limit: Optional[int] = 20,
-        offset: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """List scans in Acunetix, optionally filtered by target or status.
-
-        Args:
-            target_id: Only return scans for this target (UUID). If omitted,
-                       returns recent scans across all targets.
-            status:    Filter by scan status: 'processing', 'scheduled',
-                       'running', 'pausing', 'paused', 'completed',
-                       'aborted', 'failed', 'empty'.
-            limit:     Max scans to return (default 20).
-            offset:    Pagination cursor from a previous response.
-
-        Returns:
-            {
-              "success": true,
-              "data": {
-                "scans": [
-                  {
-                    "scan_id": "uuid",
-                    "target_id": "uuid",
-                    "profile_name": "Full Scan",
-                    "status": "completed",
-                    "start_date": "2025-01-01T10:00:00Z",
-                    "current_result_id": "uuid"   // use with acunetix__get_scan_status
-                  }, ...
-                ]
-              }
-            }
-        """
-        query_parts = []
+        target_id: str | None = None,
+        status: str | None = None,
+        limit: int | None = 20,
+        offset: str | None = None,
+    ) -> dict[str, Any]:
+        """List Acunetix scans, optionally filtered by target UUID or status."""
+        query_parts: list[str] = []
         if target_id:
+            error = validate_uuid(target_id, "target_id")
+            if error:
+                return error
             query_parts.append(f"target_id:{target_id}")
         if status:
+            if status not in VALID_SCAN_STATUSES:
+                return {
+                    "success": False,
+                    "error": {
+                        "message": f"status must be one of {sorted(VALID_SCAN_STATUSES)}.",
+                        "type": "ValidationError",
+                    },
+                }
             query_parts.append(f"status:{status}")
-        params: Dict[str, Any] = {"l": limit}
+
+        params: dict[str, Any] = {"l": validate_limit(limit)}
         if query_parts:
             params["q"] = ";".join(query_parts)
         if offset:
             params["c"] = offset
         return await acunetix.get("/scans", params=params)
 
-    @mcp.tool(name="acunetix__start_scan")
+    @mcp.tool(name="get_scan_status")
+    async def get_scan_status(scan_id: str) -> dict[str, Any]:
+        """Get status, progress, and latest result metadata for a scan UUID."""
+        error = validate_uuid(scan_id, "scan_id")
+        if error:
+            return error
+        return await acunetix.get(f"/scans/{scan_id}")
+
+    @mcp.tool(name="list_scanning_profiles")
+    async def list_scanning_profiles() -> dict[str, Any]:
+        """List Acunetix scanning profiles that can be used with start_scan."""
+        return await acunetix.get("/scanning_profiles")
+
+    @mcp.tool(name="start_scan")
     async def start_scan(
         target_id: str,
-        profile_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Start a new scan on a target immediately.
+        profile_id: str | None = None,
+        confirmation: bool = False,
+    ) -> dict[str, Any]:
+        """Start a scan on a target after policy, allowlist, and confirmation checks."""
+        error = validate_uuid(target_id, "target_id")
+        if error:
+            return error
+        if profile_id:
+            profile_error = validate_uuid(profile_id, "profile_id")
+            if profile_error:
+                return profile_error
 
-        Args:
-            target_id:  UUID of the target to scan (from acunetix__list_targets
-                        or acunetix__add_target).
-            profile_id: Scan profile UUID. If omitted, the Full Scan profile is
-                        used. To see available profiles and their IDs, call
-                        acunetix__list_scanning_profiles first.
+        policy = PolicyEngine()
+        preflight = policy.check_action(
+            "start_scan",
+            confirmed=confirmation,
+        )
+        if not preflight.allowed:
+            audit_event(
+                "start_scan",
+                allowed=preflight.allowed,
+                reason=preflight.reason,
+                details={
+                    "target_id": target_id,
+                    "profile_id": profile_id or PROFILE_FULL_SCAN,
+                },
+            )
+            return policy_error(preflight)
 
-                        Common built-in profiles:
-                        - Full Scan (default):         11111111-1111-1111-1111-111111111111
-                        - High Risk Vulnerabilities:   11111111-1111-1111-1111-111111111112
-                        - SQL Injection:               11111111-1111-1111-1111-111111111113
-                        - XSS:                         11111111-1111-1111-1111-111111111115
-                        - Crawl Only:                  11111111-1111-1111-1111-111111111116
+        target_response = await acunetix.get(f"/targets/{target_id}")
+        target_address = _target_address_from_response(target_response)
+        decision = policy.check_action(
+            "start_scan",
+            confirmed=confirmation,
+            target_id=target_id,
+            address=target_address,
+        )
+        audit_event(
+            "start_scan",
+            allowed=decision.allowed,
+            reason=decision.reason,
+            details={
+                "target_id": target_id,
+                "target_address": target_address,
+                "profile_id": profile_id or PROFILE_FULL_SCAN,
+            },
+        )
+        if not decision.allowed:
+            return policy_error(decision)
+        if not target_response.get("success"):
+            return target_response
 
-        Returns:
-            {
-              "success": true,
-              "data": {
-                "scan_id": "uuid",    // use with acunetix__get_scan_status
-                "target_id": "uuid",
-                "profile_name": "Full Scan",
-                "status": "processing"
-              }
-            }
-        """
-        body: Dict[str, Any] = {
+        body: dict[str, Any] = {
             "target_id": target_id,
             "profile_id": profile_id or PROFILE_FULL_SCAN,
             "schedule": {
                 "disable": False,
-                "start_date": None,     # null = start immediately
+                "start_date": None,
                 "time_sensitive": False,
             },
         }
-        return await acunetix.post("/scans", body=body)
+        semaphore = await _scan_semaphore()
+        async with semaphore:
+            return await acunetix.post("/scans", body=body)
 
-    @mcp.tool(name="acunetix__get_scan_status")
-    async def get_scan_status(scan_id: str) -> Dict[str, Any]:
-        """Get the current status and progress of a scan.
+    @mcp.tool(name="stop_scan")
+    async def stop_scan(scan_id: str, confirmation: bool = False) -> dict[str, Any]:
+        """Stop a running Acunetix scan after policy and confirmation checks."""
+        error = validate_uuid(scan_id, "scan_id")
+        if error:
+            return error
 
-        Poll this tool while a scan is running to check when it completes.
-        Once status is 'completed', use acunetix__get_scan_results or
-        acunetix__list_vulnerabilities for findings.
+        policy = PolicyEngine()
+        preflight = policy.check_action("stop_scan", confirmed=confirmation)
+        if not preflight.allowed:
+            audit_event(
+                "stop_scan",
+                allowed=preflight.allowed,
+                reason=preflight.reason,
+                details={"scan_id": scan_id},
+            )
+            return policy_error(preflight)
 
-        Args:
-            scan_id: UUID of the scan (from acunetix__list_scans or
-                     acunetix__start_scan).
-
-        Returns:
-            {
-              "success": true,
-              "data": {
-                "scan_id": "uuid",
-                "target_id": "uuid",
-                "profile_name": "Full Scan",
-                "status": "running" | "completed" | "aborted" | ...,
-                "current_result": {
-                  "result_id": "uuid",
-                  "status": "running",
-                  "start_date": "...",
-                  "end_date": null,
-                  "severity_counts": {
-                    "critical": 0, "high": 3, "medium": 5,
-                    "low": 12, "informational": 2
-                  }
-                }
-              }
-            }
-        """
-        return await acunetix.get(f"/scans/{scan_id}")
-
-    @mcp.tool(name="acunetix__abort_scan")
-    async def abort_scan(scan_id: str) -> Dict[str, Any]:
-        """Abort (stop) a currently running scan.
-
-        Args:
-            scan_id: UUID of the scan to stop.
-
-        Returns:
-            {"success": true, "data": null, "message": "Operation completed successfully"}
-        """
+        target_id = await _scan_target_id(scan_id)
+        decision = policy.check_action(
+            "stop_scan",
+            confirmed=confirmation,
+            target_id=target_id,
+        )
+        audit_event(
+            "stop_scan",
+            allowed=decision.allowed,
+            reason=decision.reason,
+            details={"scan_id": scan_id, "target_id": target_id},
+        )
+        if not decision.allowed:
+            return policy_error(decision)
         return await acunetix.post(f"/scans/{scan_id}/abort")
-
-    @mcp.tool(name="acunetix__get_scan_results")
-    async def get_scan_results(
-        scan_id: str,
-        limit: Optional[int] = 10,
-        offset: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """List result sessions for a scan (each run of the scan is one result).
-
-        Use the result_id values from here with acunetix__get_scan_result or
-        acunetix__get_scan_statistics for detailed per-session breakdowns.
-
-        Args:
-            scan_id: UUID of the scan.
-            limit:   Max results to return (default 10).
-            offset:  Pagination cursor.
-
-        Returns:
-            List of scan session result objects with result_id, status,
-            start_date, end_date, and vuln severity counts.
-        """
-        params: Dict[str, Any] = {"l": limit}
-        if offset:
-            params["c"] = offset
-        return await acunetix.get(f"/scans/{scan_id}/results", params=params)
-
-    @mcp.tool(name="acunetix__list_scanning_profiles")
-    async def list_scanning_profiles() -> Dict[str, Any]:
-        """List all available scan profiles (built-in and custom).
-
-        Use the profile_id values from this list when calling
-        acunetix__start_scan to target specific vulnerability classes.
-
-        Returns:
-            {
-              "success": true,
-              "data": {
-                "scanning_profiles": [
-                  {
-                    "profile_id": "11111111-...",
-                    "name": "Full Scan",
-                    "custom": false
-                  }, ...
-                ]
-              }
-            }
-        """
-        return await acunetix.get("/scanning_profiles")
