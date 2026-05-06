@@ -11,6 +11,8 @@ from fastmcp import FastMCP
 from starlette.responses import JSONResponse
 
 from .config import load_settings
+from .prompts import register_prompts
+from .resources import register_resources
 from .tools import register_all_tools
 
 
@@ -46,6 +48,8 @@ def create_server() -> FastMCP:
         return JSONResponse({"status": "ok", "service": "acunetix-mcp"})
 
     register_all_tools(mcp)
+    register_prompts(mcp)
+    register_resources(mcp)
     return mcp
 
 

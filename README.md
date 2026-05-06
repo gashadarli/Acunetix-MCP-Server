@@ -1,5 +1,8 @@
 # Acunetix MCP Server
 
+[![MCP Badge](https://lobehub.com/badge/mcp/gashadarli-acunetix-mcp-server)](https://lobehub.com/mcp/gashadarli-acunetix-mcp-server)
+[![MCP Badge](https://lobehub.com/badge/mcp-full/gashadarli-acunetix-mcp-server)](https://lobehub.com/mcp/gashadarli-acunetix-mcp-server)
+
 Production-oriented, model-agnostic MCP server for the Acunetix REST API.
 It exposes typed MCP tools for AI clients instead of a dangerous raw HTTP proxy.
 
@@ -14,6 +17,16 @@ AI Client
 
 Supported clients include Claude Desktop, Gemini CLI, ChatGPT remote MCP, Codex,
 OpenClaw, local MCP runners, and other MCP-compatible clients.
+
+## MCP Features
+
+- **Tools / skills:** 168 MCP tools, including full coverage for 161 documented
+  Acunetix API operations plus safe ergonomic wrappers.
+- **Prompts / hints:** workflow prompts for inventory summaries, scan status
+  reporting, vulnerability triage, and safe scan-start checks.
+- **Resources:** safe metadata resources for tool coverage, policy, OpenAPI
+  summary, and configuration templates.
+- **License:** MIT.
 
 ## Tool Coverage
 
@@ -87,6 +100,25 @@ For example:
   `GET /reports/download/{descriptor}`.
 - "update vulnerability status" maps to `update_vulnerability_status`, requires
   confirmation, and calls `PUT /vulnerabilities/{vuln_id}/status`.
+
+## Prompts
+
+The server exposes MCP prompts that help AI clients follow safe Acunetix
+workflows:
+
+- `acunetix_inventory_summary`
+- `acunetix_scan_status_report`
+- `acunetix_vulnerability_triage`
+- `acunetix_safe_scan_start_checklist`
+
+## Resources
+
+The server exposes read-only MCP resources:
+
+- `acunetix://tool-coverage`
+- `acunetix://policy`
+- `acunetix://openapi-summary`
+- `acunetix://configuration-template`
 
 ## Configuration
 
@@ -260,6 +292,21 @@ HTTP:
   }
 }
 ```
+
+## LobeHub Marketplace Assessment
+
+This repository includes the metadata and MCP capabilities expected by the
+LobeHub assessment:
+
+- `LICENSE` exists in the repository root.
+- README includes LobeHub claim badges.
+- Tool discovery exposes at least one tool and full Acunetix API coverage.
+- Prompt discovery exposes workflow hints.
+- Resource discovery exposes safe contextual resources.
+- Docker and stdio installation methods are documented.
+
+After pushing changes to GitHub, open the LobeHub MCP page and click
+`Check claim status` so the badge can verify repository ownership.
 
 ## Tests
 

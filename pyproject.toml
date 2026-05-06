@@ -8,6 +8,16 @@ version = "2.1.0"
 description = "Acunetix MCP Server — structured tools for the Acunetix Scanner API"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    {name = "Nijat Gashadarli"},
+]
+keywords = ["acunetix", "mcp", "security", "vulnerability-scanner"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Security",
+]
 dependencies = [
     "fastmcp>=2.3.0",
     "httpx>=0.27.0",
