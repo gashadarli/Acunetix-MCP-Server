@@ -1,7 +1,6 @@
 # Acunetix MCP Server
 
 [![MCP Badge](https://lobehub.com/badge/mcp/gashadarli-acunetix-mcp-server)](https://lobehub.com/mcp/gashadarli-acunetix-mcp-server)
-[![MCP Badge](https://lobehub.com/badge/mcp-full/gashadarli-acunetix-mcp-server)](https://lobehub.com/mcp/gashadarli-acunetix-mcp-server)
 
 Production-oriented, model-agnostic MCP server for the Acunetix REST API.
 It exposes typed MCP tools for AI clients instead of a dangerous raw HTTP proxy.
